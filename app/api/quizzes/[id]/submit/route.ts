@@ -1,43 +1,114 @@
 // app/api/quizzes/[id]/submit/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
-  const session = await auth();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    // Check authentication
+    const session = await auth();
 
-  const { answers, timeTaken } = await req.json();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const quiz = await prisma.quiz.findUnique({
-    where: { id: params.id },
-    include: { questions: { orderBy: { order: "asc" } } },
-  });
-  if (!quiz) return NextResponse.json({ error: "Quiz not found" }, { status: 404 });
+    // ✅ Next.js 15 dynamic params fix
+    const { id } = await params;
 
-  const student = await prisma.student.findFirst({ where: { userId: session.user.id } });
-  if (!student) return NextResponse.json({ error: "Student not found" }, { status: 404 });
+    // Get request body
+    const { answers, timeTaken } = await req.json();
 
-  // Auto-evaluate
-  let score = 0;
-  quiz.questions.forEach((q, i) => {
-    if (answers[i] === q.correctAnswer) score += q.marks;
-  });
+    // Find quiz
+    const quiz = await prisma.quiz.findUnique({
+      where: { id },
+      include: {
+        questions: {
+          orderBy: {
+            order: "asc",
+          },
+        },
+      },
+    });
 
-  const percentage = (score / quiz.totalMarks) * 100;
-  const passed = score >= quiz.passingMarks;
+    if (!quiz) {
+      return NextResponse.json({ error: "Quiz not found" }, { status: 404 });
+    }
 
-  const result = await prisma.quizResult.create({
-    data: {
-      quizId: quiz.id,
-      studentId: student.id,
-      answers,
-      score,
-      percentage,
-      timeTaken,
-      passed,
-    },
-  });
+    // Find student
+    const student = await prisma.student.findFirst({
+      where: {
+        userId: session.user.id,
+      },
+    });
 
-  return NextResponse.json({ result, score, percentage, passed });
+    if (!student) {
+      return NextResponse.json({ error: "Student not found" }, { status: 404 });
+    }
+
+    // Check if already submitted
+    const existingResult = await prisma.quizResult.findFirst({
+      where: {
+        quizId: quiz.id,
+        studentId: student.id,
+      },
+    });
+
+    if (existingResult) {
+      return NextResponse.json(
+        { error: "Quiz already submitted" },
+        { status: 400 },
+      );
+    }
+
+    // Auto evaluate quiz
+    let score = 0;
+
+    quiz.questions.forEach((question, index) => {
+      if (answers[index] === question.correctAnswer) {
+        score += question.marks;
+      }
+    });
+
+    // Calculate percentage
+    const percentage = (score / quiz.totalMarks) * 100;
+
+    // Pass or fail
+    const passed = score >= quiz.passingMarks;
+
+    // Save result
+    const result = await prisma.quizResult.create({
+      data: {
+        quizId: quiz.id,
+        studentId: student.id,
+        answers,
+        score,
+        percentage,
+        timeTaken,
+        passed,
+      },
+    });
+
+    // Return response
+    return NextResponse.json(
+      {
+        success: true,
+        result,
+        score,
+        percentage,
+        passed,
+      },
+      { status: 201 },
+    );
+  } catch (error) {
+    console.error("Quiz submit error:", error);
+
+    return NextResponse.json(
+      { error: "Internal Server Error" },
+      { status: 500 },
+    );
+  }
 }
